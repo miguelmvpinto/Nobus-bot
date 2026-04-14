@@ -3,19 +3,29 @@ from discord.ext import commands
 from discord import app_commands
 import yt_dlp
 import asyncio
+import os
+import tempfile
 
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn'
 }
 
-YDL_OPTIONS = {
-    'format': 'bestaudio/best',
-    'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
-    'extract_flat': False,
-}
+def get_ydl_options():
+    options = {
+        'format': 'bestaudio/best',
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': False,
+    }
+    cookies_content = os.getenv('YOUTUBE_COOKIES')
+    if cookies_content:
+        tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+        tmp.write(cookies_content)
+        tmp.close()
+        options['cookiefile'] = tmp.name
+    return options
 
 class Music(commands.Cog):
     def __init__(self, bot):
@@ -29,10 +39,9 @@ class Music(commands.Cog):
 
     async def get_audio(self, query):
         loop = asyncio.get_event_loop()
-        # Se não for URL, pesquisa no YouTube
         if not query.startswith('http'):
             query = f'ytsearch:{query}'
-        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+        with yt_dlp.YoutubeDL(get_ydl_options()) as ydl:
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(query, download=False))
             if 'entries' in info:
                 info = info['entries'][0]
