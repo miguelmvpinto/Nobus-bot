@@ -28,188 +28,198 @@ def set_server_config(guild_id: int, key: str, value):
     configs[guild_key][key] = value
     save_configs(configs)
 
-class ChannelSelect(discord.ui.ChannelSelect):
-    def __init__(self, config_key: str, label: str):
-        super().__init__(
-            placeholder=f"Escolhe o canal para {label}...",
+def skip_server_config(guild_id: int, key: str):
+    """Explicitly mark a feature as disabled (None = skipped)."""
+    configs = load_configs()
+    guild_key = str(guild_id)
+    if guild_key not in configs:
+        configs[guild_key] = {}
+    configs[guild_key][key] = None
+    save_configs(configs)
+
+CHANNELS = [
+    ("music_channel",     "🎵", "Music",      "Channel where music commands (/play, /skip, etc.) will work."),
+    ("bot_channel",       "🤖", "Commands",   "Channel where general bot commands (/help, /clear, etc.) will work."),
+    ("welcome_channel",   "👋", "Welcome",    "Channel where join/leave messages are sent automatically."),
+    ("freegames_channel", "🎮", "Free Games", "Channel where free game alerts (Epic & Steam) are posted every 6 hours."),
+]
+
+class StepView(discord.ui.View):
+    def __init__(self, wizard: "SetupWizard", key: str, emoji: str, label: str):
+        super().__init__(timeout=180)
+        self.wizard = wizard
+        self.key    = key
+
+        select = discord.ui.ChannelSelect(
+            placeholder=f"Select the {label} channel...",
             channel_types=[discord.ChannelType.text],
             min_values=1,
             max_values=1,
-            custom_id=f"select_{config_key}"
         )
-        self.config_key = config_key
-        self.label_name = label
+        select.callback = self._select_callback
+        self.add_item(select)
 
-    async def callback(self, interaction: discord.Interaction):
-        channel = self.values[0]
-        set_server_config(interaction.guild.id, self.config_key, channel.id)
+    async def _select_callback(self, interaction: discord.Interaction):
+        channel_id = int(interaction.data["values"][0])
+        ch = interaction.guild.get_channel(channel_id)
+        set_server_config(interaction.guild.id, self.key, channel_id)
+        self.wizard.results[self.key] = ch.mention if ch else f"<#{channel_id}>"
+        await interaction.response.defer()
+        await self.wizard.advance()
+
+    @discord.ui.button(label="⏭️ Skip — disable this feature", style=discord.ButtonStyle.secondary, row=1)
+    async def skip_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        skip_server_config(interaction.guild.id, self.key)
+        self.wizard.results[self.key] = "⏭️ Disabled"
+        await interaction.response.defer()
+        await self.wizard.advance()
+
+class SetupWizard:
+    def __init__(self, interaction: discord.Interaction):
+        self.interaction = interaction
+        self.guild       = interaction.guild
+        self.step        = 0
+        self.results: dict[str, str] = {}
+
+    def _step_embed(self) -> discord.Embed:
+        key, emoji, label, desc = CHANNELS[self.step]
+        total = len(CHANNELS)
+
+        filled = "█" * (self.step + 1)
+        empty  = "░" * (total - self.step - 1)
 
         embed = discord.Embed(
-            title="✅ Canal configurado!",
-            description=f"**{self.label_name}** → {channel.mention}",
-            color=discord.Color.green()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-        # Atualiza o embed principal com o progresso
-        await self.view.update_main_embed(interaction)
-
-
-class ChannelSelectView(discord.ui.View):
-    def __init__(self, guild: discord.Guild, original_interaction: discord.Interaction):
-        super().__init__(timeout=300)
-        self.guild = guild
-        self.original_interaction = original_interaction
-
-        self.music_select = ChannelSelect("music_channel", "🎵 Música")
-        self.bot_select = ChannelSelect("bot_channel", "🤖 Comandos / Bot")
-        self.welcome_select = ChannelSelect("welcome_channel", "👋 Boas-vindas")
-
-        self.add_item(self.music_select)
-        self.add_item(self.bot_select)
-        self.add_item(self.welcome_select)
-
-    def build_embed(self) -> discord.Embed:
-        config = get_server_config(self.guild.id)
-
-        def channel_mention(key):
-            cid = config.get(key)
-            if cid:
-                ch = self.guild.get_channel(cid)
-                return ch.mention if ch else "⚠️ Canal removido"
-            return "❌ Não configurado"
-
-        embed = discord.Embed(
-            title="⚙️ Setup do Nobus Bot",
-            description=(
-                "Usa os menus abaixo para configurar os canais do servidor.\n"
-                "Só administradores podem fazer isto.\n\u200b"
-            ),
+            title=f"⚙️ Server Setup  —  Step {self.step + 1} of {total}",
+            description=f"**{emoji} {label} Channel**\n{desc}\n\nPick a channel or click **Skip** to disable this feature.",
             color=discord.Color.blurple()
         )
-        embed.add_field(name="🎵 Canal de Música", value=channel_mention("music_channel"), inline=True)
-        embed.add_field(name="🤖 Canal de Comandos", value=channel_mention("bot_channel"), inline=True)
-        embed.add_field(name="👋 Canal de Boas-vindas", value=channel_mention("welcome_channel"), inline=True)
-        embed.set_footer(text="Nobus Bot Setup • Configurações guardadas automaticamente")
+        embed.add_field(name="Progress", value=f"`{filled}{empty}` {self.step + 1}/{total}", inline=False)
+
+        if self.results:
+            lines = [f"{e} **{l}:** {self.results[k]}"
+                     for k, e, l, _ in CHANNELS if k in self.results]
+            embed.add_field(name="Configured so far", value="\n".join(lines), inline=False)
+
+        embed.set_footer(text="Nobus Bot Setup • Admins only")
         return embed
 
-    async def update_main_embed(self, interaction: discord.Interaction):
-        try:
-            await self.original_interaction.edit_original_response(embed=self.build_embed(), view=self)
-        except Exception:
-            pass
+    def _summary_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="✅ Setup Complete!",
+            description="All settings have been saved. Here's a summary:",
+            color=discord.Color.green()
+        )
+        for key, emoji, label, _ in CHANNELS:
+            embed.add_field(name=f"{emoji} {label}", value=self.results.get(key, "⏭️ Disabled"), inline=True)
+        embed.set_footer(text="Use /setup to reconfigure • /config to view • /resetconfig to clear")
+        return embed
 
-    @discord.ui.button(label="✅ Concluir Setup", style=discord.ButtonStyle.success, row=3)
-    async def finish_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        config = get_server_config(self.guild.id)
-        missing = []
-        if not config.get("music_channel"):
-            missing.append("🎵 Música")
-        if not config.get("bot_channel"):
-            missing.append("🤖 Comandos / Bot")
-        if not config.get("welcome_channel"):
-            missing.append("👋 Boas-vindas")
+    async def start(self):
+        key, emoji, label, _ = CHANNELS[0]
+        view = StepView(self, key, emoji, label)
+        await self.interaction.response.send_message(
+            embed=self._step_embed(), view=view, ephemeral=True
+        )
 
-        if missing:
-            embed = discord.Embed(
-                title="⚠️ Setup incompleto",
-                description="Ainda faltam configurar:\n" + "\n".join(f"• {m}" for m in missing),
-                color=discord.Color.orange()
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+    async def advance(self):
+        self.step += 1
+        if self.step >= len(CHANNELS):
+            await self.interaction.edit_original_response(embed=self._summary_embed(), view=None)
             return
+        key, emoji, label, _ = CHANNELS[self.step]
+        view = StepView(self, key, emoji, label)
+        await self.interaction.edit_original_response(embed=self._step_embed(), view=view)
 
-        # Desativa todos os selects
+class ResetConfirmView(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=30)
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Yes, reset everything", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        configs = load_configs()
+        configs.pop(str(self.guild_id), None)
+        save_configs(configs)
         for item in self.children:
             item.disabled = True
-        button.label = "✅ Setup Concluído"
-
-        final_embed = self.build_embed()
-        final_embed.color = discord.Color.green()
-        final_embed.title = "✅ Setup Concluído!"
-        final_embed.description = "Todas as configurações foram guardadas com sucesso!"
-
-        await interaction.response.edit_message(embed=final_embed, view=self)
-
-    @discord.ui.button(label="🔄 Reset Config", style=discord.ButtonStyle.danger, row=3)
-    async def reset_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        configs = load_configs()
-        guild_key = str(self.guild.id)
-        if guild_key in configs:
-            del configs[guild_key]
-            save_configs(configs)
-
         embed = discord.Embed(
-            title="🔄 Configurações resetadas",
-            description="Todas as configurações deste servidor foram apagadas.",
+            title="🔄 Config Reset",
+            description="All settings have been cleared.\nRun `/setup` to configure again.",
             color=discord.Color.red()
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        await self.update_main_embed(interaction)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for item in self.children:
+            item.disabled = True
+        embed = discord.Embed(description="❌ Reset cancelled.", color=discord.Color.blurple())
+        await interaction.response.edit_message(embed=embed, view=self)
 
 class Setup(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="setup", description="Configura os canais do bot para este servidor.")
+    @app_commands.command(name="setup", description="Configure the bot channels for this server (Admin only)")
     @app_commands.default_permissions(administrator=True)
-    async def setup(self, interaction: discord.Interaction):
-        """Comando de setup interativo - só admins"""
-        view = ChannelSelectView(interaction.guild, interaction)
-        embed = view.build_embed()
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    async def setup_cmd(self, interaction: discord.Interaction):
+        wizard = SetupWizard(interaction)
+        await wizard.start()
 
-    @app_commands.command(name="config", description="Mostra a configuração atual do bot neste servidor.")
+    @app_commands.command(name="config", description="Show the current bot configuration")
     @app_commands.default_permissions(administrator=True)
     async def config_show(self, interaction: discord.Interaction):
-        """Mostra a config atual do servidor"""
         config = get_server_config(interaction.guild.id)
 
-        def channel_mention(key):
-            cid = config.get(key)
-            if cid:
-                ch = interaction.guild.get_channel(cid)
-                return ch.mention if ch else "⚠️ Canal removido"
-            return "❌ Não configurado"
+        def fmt(key):
+            if key not in config:
+                return "❌ Not set"
+            val = config[key]
+            if val is None:
+                return "⏭️ Disabled"
+            ch = interaction.guild.get_channel(val)
+            return ch.mention if ch else "⚠️ Channel deleted"
 
-        embed = discord.Embed(
-            title="📋 Configuração atual",
-            color=discord.Color.blurple()
-        )
-        embed.add_field(name="🎵 Música", value=channel_mention("music_channel"), inline=True)
-        embed.add_field(name="🤖 Comandos / Bot", value=channel_mention("bot_channel"), inline=True)
-        embed.add_field(name="👋 Boas-vindas", value=channel_mention("welcome_channel"), inline=True)
-        embed.set_footer(text="Usa /setup para alterar as configurações")
-
+        embed = discord.Embed(title="📋 Current Configuration", color=discord.Color.blurple())
+        for key, emoji, label, _ in CHANNELS:
+            embed.add_field(name=f"{emoji} {label}", value=fmt(key), inline=True)
+        embed.set_footer(text="Use /setup to change settings")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="resetconfig", description="Clear all bot configuration for this server (Admin only)")
+    @app_commands.default_permissions(administrator=True)
+    async def reset_config(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="⚠️ Reset Configuration",
+            description="Are you sure you want to clear **all** bot settings for this server?\nThis cannot be undone.",
+            color=discord.Color.orange()
+        )
+        await interaction.response.send_message(embed=embed, view=ResetConfirmView(interaction.guild.id), ephemeral=True)
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):
-        """Quando o bot entra num novo servidor, envia setup automático"""
-        target_channel = guild.system_channel
-        if target_channel is None:
-            for channel in guild.text_channels:
-                if channel.permissions_for(guild.me).send_messages:
-                    target_channel = channel
+        target = guild.system_channel
+        if target is None:
+            for ch in guild.text_channels:
+                if ch.permissions_for(guild.me).send_messages:
+                    target = ch
                     break
-
-        if target_channel is None:
+        if target is None:
             return
 
         embed = discord.Embed(
-            title="👋 Olá! Sou o Nobus Bot!",
+            title="👋 Hey! I'm Nobus Bot!",
             description=(
-                "Obrigado por me adicionar ao servidor!\n\n"
-                "Para começar, um **administrador** deve correr o comando:\n"
+                "Thanks for adding me to your server!\n\n"
+                "To get started, an **administrator** should run:\n"
                 "```/setup```\n"
-                "Isto vai configurar os canais para música, comandos e boas-vindas."
+                "This will configure the channels for music, commands, welcome messages, and free game alerts."
             ),
             color=discord.Color.blurple()
         )
-        embed.set_footer(text="Nobus Bot • Usa /setup para configurar")
-
+        embed.set_footer(text="Nobus Bot • Run /setup to configure")
         try:
-            await target_channel.send(embed=embed)
+            await target.send(embed=embed)
         except discord.Forbidden:
             pass
 
