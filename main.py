@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 import os
+import asyncio
 
 load_dotenv()
 
@@ -15,45 +16,44 @@ bot = commands.Bot(
     help_command=None
 )
 
-@bot.event
-async def on_ready():
-    """Executado quando o bot liga com sucesso"""
-    print(f"✅ Bot ligado como: {bot.user}")
-    print(f"📡 Em {len(bot.guilds)} servidor(es)")
-    try:
-        synced = await bot.tree.sync()
-        print(f"🔄 {len(synced)} slash command(s) sincronizado(s)")
-    except Exception as e:
-        print(f"❌ Erro ao sincronizar: {e}")
-
 async def load_cogs():
-    """Carrega todos os Cogs da pasta cogs/"""
     for filename in os.listdir("./cogs"):
         if filename.endswith(".py") and filename != "__init__.py":
             try:
                 await bot.load_extension(f"cogs.{filename[:-3]}")
-                print(f"✅ Cog carregado: {filename}")
+                print(f"✅ Cog loaded: {filename}")
             except Exception as e:
-                print(f"❌ Erro ao carregar {filename}: {e}")
+                print(f"❌ Error loading {filename}: {e}")
+
+@bot.event
+async def setup_hook():
+    """Runs before the bot connects — loads cogs and syncs commands globally."""
+    await load_cogs()
+    try:
+        synced = await bot.tree.sync()
+        print(f"🔄 {len(synced)} slash command(s) synced globally")
+    except Exception as e:
+        print(f"❌ Sync error: {e}")
+
+@bot.event
+async def on_ready():
+    print(f"✅ Bot online as: {bot.user}")
+    print(f"📡 In {len(bot.guilds)} server(s)")
 
 @bot.event
 async def on_command_error(ctx, error):
-    """Tratamento global de erros"""
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ Não tens permissão para usar este comando.")
+        await ctx.send("❌ You don't have permission to use this command.")
     elif isinstance(error, commands.MemberNotFound):
-        await ctx.send("❌ Membro não encontrado.")
+        await ctx.send("❌ Member not found.")
     elif isinstance(error, commands.CommandNotFound):
         pass
     else:
-        await ctx.send(f"❌ Erro inesperado: {error}")
+        await ctx.send(f"❌ Unexpected error: {error}")
         raise error
-    
-import asyncio
 
 async def main():
     async with bot:
-        await load_cogs()
         await bot.start(os.getenv("DISCORD_TOKEN"))
 
 asyncio.run(main())
